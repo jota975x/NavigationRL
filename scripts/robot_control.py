@@ -2,21 +2,42 @@
 
 import rclpy
 from rclpy.node import Node
-from nodes import velNode, lidarNode
+from nodes import velNode, lidarNode, posNode
+import time
+
+# HYPERPARAMETERS
+action_time = 0.5
 
 def main(args=None):
     # iniate ros2 communication
     rclpy.init(args=args)
     
+    # init nodes
     vel_node = velNode()
     lidar_node = lidarNode()
+    pos_node = posNode()
+    rclpy.spin_once(vel_node)
+    rclpy.spin_once(lidar_node)
+    rclpy.spin_once(pos_node)
     
+    # TRAINING LOOP
     while rclpy.ok():
-        # spin nodes first
-        rclpy.spin_once(lidar_node)
-        rclpy.spin_once(vel_node)
         
-        ## INSERT LOGIC HERE
+        # logic for SLAM
+        
+        # logic for selecting action (including deriving the state (map + position + lidar))
+        
+        # take action for action time
+        start_time = time.time()
+        vel_node.step(linear=0.0, angular=0.0) # replace with agent action
+        while time.time() - start_time < action_time:
+            rclpy.spin_once(vel_node)
+            rclpy.spin_once(lidar_node)
+            rclpy.spin_once(pos_node)
+            
+        # logic for deriving reward (should be inside agent)
+        
+        # logic for agent update (should be inside agent)
         
                
     # shutdown ros2 communication
