@@ -23,9 +23,9 @@ def main(args=None):
     # TRAINING LOOP
     while rclpy.ok():
         
-        # logic for SLAM
+        # TODO logic for SLAM
         
-        # logic for selecting action (including deriving the state (map + position + lidar))
+        # TODO logic for selecting action (including deriving the state (map + position + lidar))
         
         # take action for action time
         start_time = time.time()
@@ -35,9 +35,9 @@ def main(args=None):
             rclpy.spin_once(lidar_node)
             rclpy.spin_once(pos_node)
             
-        # logic for deriving reward (should be inside agent)
+        # TODO logic for deriving reward (should be inside agent)
         
-        # logic for agent update (should be inside agent)
+        # TODO logic for agent update (should be inside agent)
         
                
     # shutdown ros2 communication
