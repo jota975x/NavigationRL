@@ -1,1 +1,9 @@
 # Deep Reinforcement Learning + SLAM for Autonomous Robot Navigation
+This project integrates Deep Reinforcement Learning (DRL) with Simultaneous Localization and Mapping (SLAM) to enable autonomous navigation for robots. The system utilizes DRL for decision-making and path planning, while SLAM ensures accurate environmental mapping and localization. Together, they enable the robot to explore unknown environments, avoid obstacles, and reach specified goals efficiently. This approach leverages the strengths of both techniques to create a robust, adaptive navigation system for real-world applications.
+
+After building the package and sourcing the workspace, to be able to run the training loop you need to: initialize the Gazebo simulation, initialize the SLAM module and run `robot_control.py` in three separate terminals, the commands to do this are:
+```
+ros2 launch navigationrl gazebo.launch.py
+ros2 launch slam_toolbox online_async_launch.py params_file:=./src/navigationrl/config/mapper_params_online_async.yaml
+ros2 run navigationrl robot_control.py
+```
