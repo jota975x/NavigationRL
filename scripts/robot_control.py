@@ -25,9 +25,10 @@ def main(args=None):
     while rclpy.ok():
 
         # TODO logic for SLAM
+        state = slam_node.get_drl_state()  # Retrieve the combined map, pose, and LIDAR state
 
         # TODO logic for selecting action (including deriving the state (map + position + lidar))
-        state = slam_node.get_drl_state()  # Retrieve the combined map, pose, and LIDAR state
+        
         # take action for action time
         start_time = time.time()
         vel_node.step(linear=0.0, angular=0.0)  # replace with agent action

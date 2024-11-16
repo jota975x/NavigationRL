@@ -11,6 +11,8 @@ from tf2_ros import TransformListener, Buffer
 import tf_transformations
 import numpy as np
 
+MAP_SIZE = 750
+
 
 class SlamIntegrationNode(Node):
     def __init__(self):
@@ -28,6 +30,9 @@ class SlamIntegrationNode(Node):
             10
         )
         self.processed_map = None
+        
+        # Create DRL map (this ensures map passed into DRL agent has same size always)
+        self.drl_map = np.zeros(shape=[MAP_SIZE, MAP_SIZE])
 
         # Initialize Transform Listener for localization (map -> base_link)
         self.tf_buffer = Buffer()
@@ -88,7 +93,20 @@ class SlamIntegrationNode(Node):
 
         # Map data
         if hasattr(self, 'processed_map') and self.processed_map is not None:
-            state['map'] = self.processed_map
+            # Paste SLAM map into DRL map
+            drl_map_rows, drl_map_cols = self.drl_map.shape
+            slam_map_rows, slam_map_cols = self.processed_map.shape
+            
+            # Assertion to ensure DRL map matrix is larger than SLAM map
+            assert drl_map_rows >= slam_map_rows and drl_map_cols >= slam_map_cols, (
+                "The empty matrix must be larger than or equal to the map matrix in both dimensions."
+            )
+            
+            start_row = (drl_map_rows - slam_map_rows) // 2
+            start_col = (drl_map_cols - slam_map_cols) // 2
+            self.drl_map[start_row:start_row + slam_map_rows, start_col:start_col + slam_map_cols] = self.processed_map            
+            
+            state['map'] = self.drl_map
         else:
             state['map'] = np.zeros((100, 100))  # Placeholder if map is unavailable
 
