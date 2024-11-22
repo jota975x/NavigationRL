@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
@@ -13,6 +12,7 @@ import numpy as np
 
 MAP_SIZE = 750
 MAXIMUM_RANGE = 5.0
+
 
 class SlamIntegrationNode(Node):
     def __init__(self):
@@ -30,9 +30,10 @@ class SlamIntegrationNode(Node):
             10
         )
         self.processed_map = None
-        
+
         # Create DRL map (this ensures map passed into DRL agent has same size always)
         self.drl_map = np.zeros(shape=[MAP_SIZE, MAP_SIZE])
+        self.wall_threshold = 0.1
 
         # Initialize Transform Listener for localization (map -> base_link)
         self.tf_buffer = Buffer()
@@ -41,8 +42,62 @@ class SlamIntegrationNode(Node):
         self.get_logger().info("SLAM Integration Node Initialized.")
 
     def scan_callback(self, msg):
-        self.lidar_data = np.array(msg.ranges)  # Convert to numpy array
+        self.lidar_data = np.array(msg.ranges)
+        self.lidar_data[np.isinf(self.lidar_data)] = MAXIMUM_RANGE
+        # Convert to numpy array
         # self.get_logger().info(f"LIDAR data processed: {self.lidar_data.shape}")
+        # Check for walls in the front section of the robot
+        is_wall_detected = self.is_wall_in_front()
+
+        if is_wall_detected:
+            self.get_logger().warn("Wall detected in front!")
+        else:
+            self.get_logger().info("No wall in front.")
+
+    def is_goal_reached(self, goal, pose):
+        """
+        Check if the robot has reached the goal.
+
+        Args:
+            goal (torch.Tensor): The goal coordinates as a tensor [x, y].
+
+        Returns:
+            bool: True if the goal is reached, False otherwise.
+        """
+        if pose is None:
+            return False  # Cannot determine pose
+
+        x_robot, y_robot, _ = pose
+        x_goal, y_goal = goal[0].item(), goal[1].item()
+
+        # Calculate Euclidean distance to the goal
+        distance = np.sqrt((x_goal - x_robot) ** 2 + (y_goal - y_robot) ** 2)
+
+        # Check if within the threshold
+        threshold = 0.1  # Adjust as needed
+        return distance < threshold
+
+    def is_wall_in_front(self):
+        """
+        Check if a wall is within the threshold distance in the front of the robot.
+        Returns:
+            bool: True if a wall is detected, False otherwise.
+        """
+        if self.lidar_data is None:
+            return False  # No data available
+
+        # Define the range of angles for the "front" section
+        front_angle_start = 350  # Degrees near the front-left (in LIDAR indices)
+        front_angle_end = 10  # Degrees near the front-right (wrap-around case)
+
+        # Extract ranges for the front section
+        front_ranges = np.concatenate((
+            self.lidar_data[front_angle_start:],
+            self.lidar_data[:front_angle_end]
+        ))
+
+        # Check if any range in the front is below the threshold
+        return np.any(front_ranges < self.wall_threshold)
 
     def map_callback(self, msg):
         """
@@ -57,7 +112,6 @@ class SlamIntegrationNode(Node):
         map_data = np.clip(map_data, 0, 100) / 100.0
 
         self.processed_map = map_data  # Store for use in the DRL state
-
 
     def get_robot_pose(self):
         """
@@ -77,7 +131,7 @@ class SlamIntegrationNode(Node):
                 [rotation.x, rotation.y, rotation.z, rotation.w]
             )
             x, y, theta = translation.x, translation.y, euler[2]
-            # self.get_logger().info(f"Robot Pose: x={x}, y={y}, theta={theta}")
+            self.get_logger().info(f"Robot Pose: x={x}, y={y}, theta={theta}")
             return x, y, theta
         except Exception as e:
             # self.get_logger().warn(f"Failed to get robot pose: {e}")
@@ -96,16 +150,16 @@ class SlamIntegrationNode(Node):
             # Paste SLAM map into DRL map
             drl_map_rows, drl_map_cols = self.drl_map.shape
             slam_map_rows, slam_map_cols = self.processed_map.shape
-            
+
             # Assertion to ensure DRL map matrix is larger than SLAM map
             assert drl_map_rows >= slam_map_rows and drl_map_cols >= slam_map_cols, (
                 "The empty matrix must be larger than or equal to the map matrix in both dimensions."
             )
-            
+
             start_row = (drl_map_rows - slam_map_rows) // 2
             start_col = (drl_map_cols - slam_map_cols) // 2
-            self.drl_map[start_row:start_row + slam_map_rows, start_col:start_col + slam_map_cols] = self.processed_map            
-            
+            self.drl_map[start_row:start_row + slam_map_rows, start_col:start_col + slam_map_cols] = self.processed_map
+
             state['map'] = self.drl_map
         else:
             state['map'] = np.zeros((MAP_SIZE, MAP_SIZE))  # Placeholder if map is unavailable
@@ -120,7 +174,7 @@ class SlamIntegrationNode(Node):
         # LIDAR data
         if self.lidar_data is not None:
             # Handle 'inf' values
-            self.lidar_data[np.isinf(self.lidar_data)] = MAXIMUM_RANGE    
+            self.lidar_data[np.isinf(self.lidar_data)] = MAXIMUM_RANGE
             state['lidar'] = self.lidar_data
         else:
             state['lidar'] = np.zeros(360)  # Placeholder for 360-degree LIDAR
