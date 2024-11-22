@@ -14,6 +14,7 @@ LOG_SIG_MAX = 2
 EPS = 1e-8
 GAMMA = 0.99
 LAMBDA = 0.95
+ALPHA = 0.01
 CLIP_EPS = 0.2
 NUM_EPOCHS = 5
 LEARNING_RATE = 1e-3
@@ -99,11 +100,12 @@ class PolicyNetwork(nn.Module):
         dist = torch.distributions.Normal(mu, std)
         action = dist.rsample()
         log_prob = dist.log_prob(action).sum(dim=-1)
+        entropy = dist.entropy().mean()
         
         action = (torch.tanh(action) + 1.0) / 2
         action = action * self.action_scale + self.action_bias
         
-        return action.detach().cpu().numpy(), log_prob
+        return action.detach().cpu().numpy(), log_prob, entropy
         
 
 # TODO switch it to estimate V instead of Q (should also require other minor changes somewhere else)
@@ -173,13 +175,14 @@ class CriticNetwork(nn.Module):
 
 class PPOAgent(nn.Module):
     def __init__(self, state_dim: int=STATE_DIM, action_dim: int=ACTION_DIM, learning_rate = LEARNING_RATE,
-                 gamma=GAMMA, lambda_=LAMBDA, clip_eps=CLIP_EPS, num_epochs: int=NUM_EPOCHS):
+                 gamma=GAMMA, lambda_=LAMBDA, alpha=ALPHA, clip_eps=CLIP_EPS, num_epochs: int=NUM_EPOCHS):
         super(PPOAgent, self).__init__()
         
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.gamma = gamma
         self.lamda = lambda_
+        self.alpha = alpha
         self.clip_eps = clip_eps
         self.num_epochs = num_epochs
         
@@ -230,13 +233,15 @@ class PPOAgent(nn.Module):
         # PPO policy optimization
         for _ in range(self.num_epochs):
             # sample actions from current policy
-            new_actions, new_logprobs = [], []
+            new_actions, new_logprobs, new_entropy = [], [], []
             for state in states:    # assume same foal for all trajectory
-                action, log_prob = self.actor.sample_action(np.array([state]), goal)
+                action, log_prob, entropy = self.actor.sample_action(np.array([state]), goal)
                 new_actions.append(action.squeeze())
                 new_logprobs.append(log_prob.squeeze())
+                new_entropy.append(entropy)
             new_logprobs = torch.stack(new_logprobs).to(device)
             new_actions = torch.tensor(np.array(new_actions)).to(device)
+            new_entropy = torch.stack(new_entropy).to(device)
             
             # calculate ratios
             ratios = torch.exp(new_logprobs - old_log_probs)
@@ -245,6 +250,8 @@ class PPOAgent(nn.Module):
             obj_clip = ratios * advantages
             obj_surrogate = torch.min(obj_clip, torch.clamp(ratios, 1 - self.clip_eps, 1 + self.clip_eps) * advantages)
             policy_loss = -torch.mean(obj_surrogate)
+            # add entropy term
+            policy_loss = policy_loss + self.alpha * new_entropy.mean()
             
             # update actor
             self.actor_optim.zero_grad()

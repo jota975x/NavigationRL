@@ -50,7 +50,7 @@ def main(args=None):
             state = slam_node.get_drl_state()   # retrieve combined map, pose and LiDAR state
             
             # select action and perform for ACTION_TIME
-            action, logprob = agent.actor.sample_action(np.array([state]), goal)
+            action, logprob, _ = agent.actor.sample_action(np.array([state]), goal)
             start_time = time.time()
             vel_node.step(linear=float(action.squeeze()[0]), angular=float(action.squeeze()[1]))
             while time.time() - start_time < ACTION_TIME:
