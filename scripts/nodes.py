@@ -47,12 +47,12 @@ class SlamIntegrationNode(Node):
         # Convert to numpy array
         # self.get_logger().info(f"LIDAR data processed: {self.lidar_data.shape}")
         # Check for walls in the front section of the robot
-        is_wall_detected = self.is_wall_in_front()
+        #is_wall_detected = self.is_wall_in_front()
 
-        if is_wall_detected:
-            self.get_logger().warn("Wall detected in front!")
-        else:
-            self.get_logger().info("No wall in front.")
+        #if is_wall_detected:
+            #self.get_logger().warn("Wall detected in front!")
+        #else:
+            #self.get_logger().info("No wall in front.")
 
     def is_goal_reached(self, goal, pose):
         """
