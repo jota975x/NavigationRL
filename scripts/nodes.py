@@ -12,7 +12,7 @@ import tf_transformations
 import numpy as np
 
 MAP_SIZE = 750
-
+MAXIMUM_RANGE = 5.0
 
 class SlamIntegrationNode(Node):
     def __init__(self):
@@ -42,13 +42,13 @@ class SlamIntegrationNode(Node):
 
     def scan_callback(self, msg):
         self.lidar_data = np.array(msg.ranges)  # Convert to numpy array
-        self.get_logger().info(f"LIDAR data processed: {self.lidar_data.shape}")
+        # self.get_logger().info(f"LIDAR data processed: {self.lidar_data.shape}")
 
     def map_callback(self, msg):
         """
         Callback to process the map received from SLAM Toolbox.
         """
-        self.get_logger().info(f"Map received: {msg.info.width} x {msg.info.height}")
+        # self.get_logger().info(f"Map received: {msg.info.width} x {msg.info.height}")
         # Convert OccupancyGrid data to a 2D numpy array
         map_data = np.array(msg.data, dtype=np.int8).reshape((msg.info.height, msg.info.width))
 
@@ -77,10 +77,10 @@ class SlamIntegrationNode(Node):
                 [rotation.x, rotation.y, rotation.z, rotation.w]
             )
             x, y, theta = translation.x, translation.y, euler[2]
-            self.get_logger().info(f"Robot Pose: x={x}, y={y}, theta={theta}")
+            # self.get_logger().info(f"Robot Pose: x={x}, y={y}, theta={theta}")
             return x, y, theta
         except Exception as e:
-            self.get_logger().warn(f"Failed to get robot pose: {e}")
+            # self.get_logger().warn(f"Failed to get robot pose: {e}")
             return None
 
     def get_drl_state(self):
@@ -108,7 +108,7 @@ class SlamIntegrationNode(Node):
             
             state['map'] = self.drl_map
         else:
-            state['map'] = np.zeros((100, 100))  # Placeholder if map is unavailable
+            state['map'] = np.zeros((MAP_SIZE, MAP_SIZE))  # Placeholder if map is unavailable
 
         # Robot pose
         pose = self.get_robot_pose()
@@ -119,10 +119,12 @@ class SlamIntegrationNode(Node):
 
         # LIDAR data
         if self.lidar_data is not None:
+            # Handle 'inf' values
+            self.lidar_data[np.isinf(self.lidar_data)] = MAXIMUM_RANGE    
             state['lidar'] = self.lidar_data
         else:
             state['lidar'] = np.zeros(360)  # Placeholder for 360-degree LIDAR
-        self.get_logger().info(f"DRL state: {state}")
+        # self.get_logger().info(f"DRL state: {state}")
         return state
 
 

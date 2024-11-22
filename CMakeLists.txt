@@ -25,6 +25,7 @@ find_package(rclpy REQUIRED)
 install(PROGRAMS
   scripts/robot_control.py
   scripts/nodes.py
+  scripts/agent.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

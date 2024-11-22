@@ -1,185 +1,263 @@
-
-"""
-conda env create -f env.yml
-conda activate ppo_env
-"""
-
-
 import torch
 import torch.nn as nn
-from tensordict.nn import TensorDictModule
-from tensordict.nn.distributions import NormalParamExtractor
-from torchrl.modules import ProbabilisticActor, TanhNormal, ValueOperator
-from torchrl.collectors import SyncDataCollector
-from torchrl.data.replay_buffers import ReplayBuffer
-from torchrl.data.replay_buffers.samplers import SamplerWithoutReplacement
-from torchrl.data.replay_buffers.storages import LazyTensorStorage
-from torchrl.objectives import ClipPPOLoss
-from torchrl.objectives.value import GAE
+import torch.optim as optim
+import numpy as np
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+MAP_FEATURE_DIM = 128
+MAP_SIZE = 750
+STATE_DIM = 493
+ACTION_DIM = 2
+LOG_SIG_MIN = -20
+LOG_SIG_MAX = 2
+EPS = 1e-8
+GAMMA = 0.99
+LAMBDA = 0.95
+CLIP_EPS = 0.2
+NUM_EPOCHS = 5
+LEARNING_RATE = 1e-3
+ACTION_LOW = torch.tensor([-1.0, -0.5]).to(device)
+ACTION_HIGH = torch.tensor([1.0, 0.5]).to(device)
 
 class PolicyNetwork(nn.Module):
-    def __init__(self, in_dim, out_dim):
+    def __init__(self, state_dim: int = STATE_DIM, action_dim: int = ACTION_DIM):
         super(PolicyNetwork, self).__init__()
-        self.in_dim = in_dim
-        self.out_dim = out_dim
-        self.policy_net = nn.Sequential(
-            nn.Linear(in_dim, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, 2 * out_dim),  # times 2 due to mu and variance
-            NormalParamExtractor()  # extract mu and variance to construct the distribution
+        
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.activation = nn.ReLU()
+        self.maxPool = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.action_scale = ACTION_HIGH - ACTION_LOW
+        self.action_bias = ACTION_LOW
+        
+        self.MapFeatureExtraction = nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=3, stride=1, padding=1),
+            self.activation,
+            self.maxPool,
+            
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+            self.activation,
+            self.maxPool,
+            
+            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1),
+            self.activation,
+            self.maxPool,
+            
+            nn.Flatten(),
+            nn.Linear(64 * (MAP_SIZE // 8) * (MAP_SIZE // 8), MAP_FEATURE_DIM),
+            nn.ReLU()
         )
-
-    def forward(self, x):
-        return self.policy_net(x)
+        
+        self.FC = nn.Sequential(
+            nn.Linear(self.state_dim, 256),
+            self.activation,
+            nn.Linear(256, 128),
+            self.activation,
+            nn.Linear(128, 64),
+            self.activation
+        )
+        
+        self.mu = nn.Linear(64, action_dim)
+        self.log_std = nn.Linear(64, action_dim)
+        
+    def forward(self, x, goal):
+        maps, poses, lidars = [], [], []
+        
+        for i in range(len(x)):
+            map_ = torch.tensor(x[i]['map'], dtype=torch.float32).to(device).unsqueeze(0).unsqueeze(0)
+            pose_ = torch.tensor(x[i]['pose'], dtype=torch.float32).to(device)
+            lidar_ = torch.tensor(x[i]['lidar'], dtype=torch.float32).to(device)
+            
+            # get map features
+            map_features = self.MapFeatureExtraction(map_).squeeze()
+            
+            maps.append(map_features)
+            poses.append(pose_)
+            lidars.append(lidar_)
+            
+        maps = torch.stack(maps).to(device)
+        poses = torch.stack(poses).to(device)
+        lidars = torch.stack(lidars).to(device)
+        goal = goal.unsqueeze(0).repeat(len(x), 1)
+        
+        # Combine inputs and pass it through policy to get action mean and log_std
+        x = torch.cat((maps, poses, lidars, goal), dim=1).to(device)
+        x = self.FC(x)
+        mu = self.mu(x)
+        log_std = self.log_std(x)
+        log_std = torch.clamp(log_std, min=LOG_SIG_MIN, max=LOG_SIG_MAX)
+        
+        return mu, log_std
+    
+    def sample_action(self, state, goal):
+        
+        mu, log_std = self.forward(state, goal)
+        std = log_std.exp()
+        
+        # Sample from normal distribution 
+        dist = torch.distributions.Normal(mu, std)
+        action = dist.rsample()
+        log_prob = dist.log_prob(action)
+        
+        action = (torch.tanh(action) + 1.0) / 2
+        action = action * self.action_scale + self.action_bias
+        
+        return action.detach().cpu().numpy(), log_prob
+        
 
 class CriticNetwork(nn.Module):
-    def __init__(self, in_dim, out_dim):
+    def __init__(self, state_dim: int = STATE_DIM, action_dim: int = ACTION_DIM):
         super(CriticNetwork, self).__init__()
-        self.q_net = nn.Sequential(
-            nn.Linear(in_dim, 128),
-            nn.ReLU(),
+        
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.activation = nn.ReLU()
+        self.maxPool = nn.MaxPool2d(kernel_size=2, stride=2)
+        
+        self.MapFeatureExtraction = nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=3, stride=1, padding=1),
+            self.activation,
+            self.maxPool,
+            
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+            self.activation,
+            self.maxPool,
+            
+            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1),
+            self.activation,
+            self.maxPool,
+            
+            nn.Flatten(),
+            nn.Linear(64 * (MAP_SIZE // 8) * (MAP_SIZE // 8), MAP_FEATURE_DIM),
+            nn.ReLU()
+        )
+        
+        self.FC = nn.Sequential(
+            nn.Linear(self.state_dim + self.action_dim, 256),
+            self.activation,
+            nn.Linear(256, 128),
+            self.activation,
             nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, out_dim),
+            self.activation,
+            nn.Linear(64, 1)
         )
+        
+    def forward(self, x, goal, action):
+        
+        maps, poses, lidars = [], [], []
+        
+        for i in range(len(x)):
+            map_ = torch.tensor(x[i]['map'], dtype=torch.float32).to(device).unsqueeze(0).unsqueeze(0)
+            pose_ = torch.tensor(x[i]['pose'], dtype=torch.float32).to(device)
+            lidar_ = torch.tensor(x[i]['lidar'], dtype=torch.float32).to(device)
+            
+            # get map features
+            map_features = self.MapFeatureExtraction(map_).squeeze()
+            
+            maps.append(map_features)
+            poses.append(pose_)
+            lidars.append(lidar_)
 
-    def forward(self, x):
-        return self.q_net(x)
-
-class PPOAgent:
-    def __init__(self, env, gamma=0.99, clip=0.2, epochs=10, lr=1e-4, device=None):
-        self.env = env
-        self.lr = lr
-        self.gamma = gamma
-        self.lambda_gae = 0.95
-        self.clip = clip
-        self.epochs = epochs
-        self.frames_per_batch = 1000
-        self.total_frames = 200000
-        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        # Initialize networks
-        self.policy_net = PolicyNetwork(
-            in_dim=env.observation_space.shape[0],
-            out_dim=env.action_space.shape[0]
-        )
-        self.critic_net = CriticNetwork(
-            in_dim=env.observation_space.shape[0],
-            out_dim=env.action_space.shape[0]
-        )
-
-        # Setup policy module
-        self.policy_module = ProbabilisticActor(
-            module=TensorDictModule(
-                self.policy_net.policy_net,
-                in_keys=["observation"],
-                out_keys=["loc", "scale"]
-            ),
-            spec=env.action_spec,
-            in_keys=["loc", "scale"],
-            distribution_class=TanhNormal,
-            distribution_kwargs={
-                "min": env.action_spec.space.low[0],
-                "max": env.action_spec.space.high[0],
-            },
-            return_log_prob=True
-        )
-
-        # Setup critic module
-        self.critic_module = ValueOperator(
-            module=self.critic_net.q_net,
-            in_keys=["observation"]
-        )
-
-        # Initialize PPO loss
-        self.loss_module = ClipPPOLoss(
-            actor_network=self.policy_module,
-            critic_network=self.critic_module,
-            clip_param=clip,
-            entropy_coef=0.01,
-        )
-
-        # Setup optimizer
-        self.optimizer = torch.optim.Adam(self.loss_module.parameters(), lr=lr)
-
-        # Initialize data collector
-        self.collector = SyncDataCollector(
-            self.env,
-            self.policy_module,
-            frames_per_batch=self.frames_per_batch,
-            total_frames=self.total_frames,
-            split_trajs=False,
-            device=self.device,
-        )
-
-        # Setup replay buffer
-        self.replay_buffer = ReplayBuffer(
-            storage=LazyTensorStorage(max_size=100),
-            sampler=SamplerWithoutReplacement(),
-        )
-
-        # Setup advantage calculation
-        self.advantage_module = GAE(
-            gamma=self.gamma,
-            lmbda=self.lambda_gae,
-            value_network=self.critic_module,
-            average_gae=True
-        )
-
-    def train(self):
-        loss_objective_list = []
-        loss_critic_list = []
-        loss_entropy_list = []
-        rewards = []
-
-        for i, tensordict_data in enumerate(self.collector):
-            tensordict_data = self.advantage_module(tensordict_data)
-            data = tensordict_data.reshape(-1)
-            self.replay_buffer.extend(data)
-
-            r = tensordict_data.get('next').get("reward").sum().item()
-            episode_rewards = [r]
-
-            for _ in range(self.epochs):
-                subdata = self.replay_buffer.sample(64)
-                loss_val = self.loss_module(subdata.to(self.device))
-                
-                total_loss = (
-                    loss_val["loss_objective"] +
-                    loss_val["loss_critic"] +
-                    loss_val["loss_entropy"]
-                )
-
-                loss_objective_list.append(loss_val["loss_objective"].cpu().item())
-                loss_critic_list.append(loss_val["loss_critic"].cpu().item())
-                loss_entropy_list.append(loss_val["loss_entropy"].cpu().item())
-
-                total_loss.backward()
-                self.optimizer.step()
-                self.optimizer.zero_grad()
-
-            if i % 10 == 0:
-                with torch.no_grad():
-                    avg_reward = sum(episode_rewards) / len(episode_rewards)
-                    print(f"Episodic Reward at iteration {i}: {avg_reward}")
-                    rewards.append(avg_reward)
-
-        return loss_objective_list, loss_critic_list, loss_entropy_list, rewards
+        maps = torch.stack(maps).to(device)
+        poses = torch.stack(poses).to(device)
+        lidars = torch.stack(lidars).to(device)
+        actions = torch.tensor(np.array(action)).to(device)
+        goal = goal.unsqueeze(0).repeat(len(x), 1)
+        
+        # Combine inputs and pass it through policy to get action mean and log_std
+        x = torch.cat((maps, poses, lidars, goal, actions), dim=1)
+        q = self.FC(x)        
+        
+        return q
     
 
-"""
-from torchrl.envs import TransformedEnv, Compose, DoubleToFloat
-from torchrl.envs.libs.gym import GymEnv
+class PPOAgent(nn.Module):
+    def __init__(self, state_dim: int=STATE_DIM, action_dim: int=ACTION_DIM, learning_rate = LEARNING_RATE,
+                 gamma=GAMMA, lambda_=LAMBDA, clip_eps=CLIP_EPS, num_epochs: int=NUM_EPOCHS):
+        super(PPOAgent, self).__init__()
+        
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.gamma = gamma
+        self.lamda = lambda_
+        self.clip_eps = clip_eps
+        self.num_epochs = num_epochs
+        
+        # Define actor/critic and their optimizers
+        self.actor = PolicyNetwork(state_dim=state_dim, action_dim=action_dim)
+        self.critic = CriticNetwork(state_dim=state_dim, action_dim=action_dim)
+        
+        self.actor_optim = optim.Adam(self.actor.parameters(), lr=learning_rate)
+        self.critic_optim = optim.Adam(self.critic.parameters(), lr=learning_rate)
+        
+        # Create target critic
+        self.target_critic = CriticNetwork(state_dim=state_dim, action_dim=action_dim)
+        self.target_critic.load_state_dict(self.critic.state_dict())
+        
+    def compute_advantages(self, states, goal, actions, next_states, rewards, dones):
+        values = self.critic(states, goal, actions)
+        with torch.no_grad():
+            next_actions, _ = self.actor.sample_action(next_states, goal)
+            next_values = self.target_critic(next_states, goal, next_actions)
+        
+        # GAE variables
+        n_steps = len(rewards)
+        advantages = np.zeros(n_steps)
+        gae = 0
+        
+        # Traverse in reverse order
+        for t in reversed(range(n_steps)):
+            delta = rewards[t] + self.gamma * next_values[t] * (1 - dones[t]) - values[t]
+            gae = delta + self.gamma * self.lamda * (1 - dones[t]) * gae
+            advantages[t] = gae
+            
+        return advantages
+    
+    def update(self, states, goal, actions, old_log_probs, rewards, next_states, dones):
+        old_log_probs = torch.stack(old_log_probs).to(device).detach()
+        
+        # compute advantages
+        advantages = self.compute_advantages(states, goal, actions, next_states, rewards, dones)
+        advantages = torch.tensor(advantages).to(device)
+        
+        # compute returns
+        returns = advantages + self.target_critic(states, goal, actions).squeeze().detach()
+        
+        # normalize advantages
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        advantages = advantages.unsqueeze(-1).detach()
+        
+        # PPO policy optimization
+        for _ in range(self.num_epochs):
+            # sample actions from current policy
+            new_actions, new_logprobs = [], []
+            for state in states:    # assume same foal for all trajectory
+                action, log_prob = self.actor.sample_action(np.array([state]), goal)
+                new_actions.append(action.squeeze())
+                new_logprobs.append(log_prob.squeeze())
+            new_logprobs = torch.stack(new_logprobs).to(device)
+            new_actions = torch.tensor(np.array(new_actions)).to(device)
+            
+            # calculate ratios
+            ratios = torch.exp(new_logprobs - old_log_probs)
+            
+            # compute surrogate losses
+            obj_clip = ratios * advantages
+            obj_surrogate = torch.min(obj_clip, torch.clamp(ratios, 1 - self.clip_eps, 1 + self.clip_eps) * advantages)
+            policy_loss = -torch.mean(obj_surrogate)
+            
+            # update actor
+            self.actor_optim.zero_grad()
+            policy_loss.backward()
+            self.actor_optim.step()
+            
+            # compute value loss (critic loss)
+            critic_loss = torch.mean((returns - self.critic(states, goal, actions))**2)
+            
+            # update critic
+            self.critic_optim.zero_grad()
+            critic_loss.backward()
+            self.critic_optim.step()
 
-# Create and transform the environment
-env = GymEnv("InvertedDoublePendulum-v4")
-env = TransformedEnv(env, Compose(DoubleToFloat(["observation"])))
-
-# Initialize the agent
-agent = PPOAgent(env=env)
-
-# Train the agent
-losses_obj, losses_critic, losses_entropy, rewards = agent.train()
-"""
+            
