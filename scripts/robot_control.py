@@ -37,18 +37,18 @@ def main(args=None):
 
     # TRAINING LOOP
     for episode in range(NUM_EPISODES):
-        
+
         # TODO reset environment (selecting robot spawn point, select a new goal every few episodes)
         goal = torch.tensor([1, 10], dtype=torch.float32).to(device)
-        
+
         # initialize trajectory variables
         total_reward = 0
         states, actions, old_log_probs, rewards, next_states, dones = [], [], [], [], [], []
-        
+
         for step in range(NUM_ACTION_PER_EPISODE):
-            
-            state = slam_node.get_drl_state()   # retrieve combined map, pose and LiDAR state
-            
+
+            state = slam_node.get_drl_state()  # retrieve combined map, pose and LiDAR state
+
             # select action and perform for ACTION_TIME
             action, logprob, _ = agent.actor.sample_action(np.array([state]), goal)
             start_time = time.time()
@@ -57,15 +57,18 @@ def main(args=None):
                 rclpy.spin_once(slam_node)
                 rclpy.spin_once(vel_node)
                 rclpy.spin_once(pos_node)
-                
+
             next_state = slam_node.get_drl_state()
-            
+
             # TODO logic for deriving reward
             reward = 1
-            
+
             # TODO logic for deriving if done
             done = False
-            
+            if (slam_node.is_wall_in_front()):
+                done = True
+            if (slam_node.is_goal_reached(goal, next_state['pose'])):
+                done = True
             # save trajectory
             states.append(state)
             actions.append(action.squeeze())
@@ -73,17 +76,18 @@ def main(args=None):
             rewards.append(reward)
             next_states.append(next_state)
             dones.append(done)
-            
+
+
             # Break if episode if done
             if done:
                 break
-            
+
         # Agent Update with Rollout (trajectory)
         agent.update(states, goal, old_log_probs, rewards, next_states, dones)
-        
+
         # TODO Log episode metrics
         episode_rewards.append(total_reward)
-    
+
     # shutdown ros2 communication
     rclpy.shutdown()
 
