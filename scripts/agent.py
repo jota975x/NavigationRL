@@ -191,38 +191,42 @@ class PPOAgent(nn.Module):
         self.actor_optim = optim.Adam(self.actor.parameters(), lr=learning_rate)
         self.critic_optim = optim.Adam(self.critic.parameters(), lr=learning_rate)
         
-        # Create target critic
-        self.target_critic = CriticNetwork(state_dim=state_dim, action_dim=action_dim)
-        self.target_critic.load_state_dict(self.critic.state_dict())
+        # Create target critic (not necessary, but could be added if we see any errors)
+        # self.target_critic = CriticNetwork(state_dim=state_dim, action_dim=action_dim)
+        # self.target_critic.load_state_dict(self.critic.state_dict())
         
-    def compute_advantages(self, states, goal, actions, next_states, rewards, dones):
+    def compute_returns_and_advantages(self, states, goal, actions, next_states, rewards, dones):
         values = self.critic(states, goal, actions)
         with torch.no_grad():
             next_actions, _ = self.actor.sample_action(next_states, goal)
-            next_values = self.target_critic(next_states, goal, next_actions)
+            next_values = self.critic(next_states, goal, next_actions)
         
         # GAE variables
         n_steps = len(rewards)
         advantages = np.zeros(n_steps)
+        returns = np.zeros(n_steps)
         gae = 0
+        return_t = 0
         
         # Traverse in reverse order
         for t in reversed(range(n_steps)):
+            # compute advantages 
             delta = rewards[t] + self.gamma * next_values[t] * (1 - dones[t]) - values[t]
             gae = delta + self.gamma * self.lamda * (1 - dones[t]) * gae
             advantages[t] = gae
             
-        return advantages
+            # compute returns
+            return_t = rewards[t] + self.gamma * (1 - dones[t]) * return_t  # target for critic Q = reward + gamma * Q' (return_t)
+            returns[t] =  return_t
+            
+        return returns, advantages
     
     def update(self, states, goal, actions, old_log_probs, rewards, next_states, dones):
         old_log_probs = torch.stack(old_log_probs).to(device).detach()
         
-        # compute advantages
-        advantages = self.compute_advantages(states, goal, actions, next_states, rewards, dones)
+        # compute returns and advantages
+        returns, advantages = self.compute_returns_and_advantages(states, goal, actions, next_states, rewards, dones)
         advantages = torch.tensor(advantages).to(device)
-        
-        # compute returns
-        returns = advantages + self.target_critic(states, goal, actions).squeeze().detach()
         
         # normalize advantages
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
