@@ -8,10 +8,10 @@ import torch
 import numpy as np
 
 # HYPERPARAMETERS
-TOTAL_EPISODE_TIME = 60
+TOTAL_EPISODE_TIME = 1
 ACTION_TIME = 0.2
 NUM_ACTION_PER_EPISODE = int(TOTAL_EPISODE_TIME // ACTION_TIME)
-NUM_EPISODES = 500
+NUM_EPISODES = 1
 NEW_GOAL_EVERY = 5
 
 # device
@@ -79,7 +79,7 @@ def main(args=None):
                 break
             
         # Agent Update with Rollout (trajectory)
-        agent.update(states, goal, actions, old_log_probs, rewards, next_states, dones)
+        agent.update(states, goal, old_log_probs, rewards, next_states, dones)
         
         # TODO Log episode metrics
         episode_rewards.append(total_reward)

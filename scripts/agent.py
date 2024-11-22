@@ -98,7 +98,7 @@ class PolicyNetwork(nn.Module):
         # Sample from normal distribution 
         dist = torch.distributions.Normal(mu, std)
         action = dist.rsample()
-        log_prob = dist.log_prob(action)
+        log_prob = dist.log_prob(action).sum(dim=-1)
         
         action = (torch.tanh(action) + 1.0) / 2
         action = action * self.action_scale + self.action_bias
@@ -106,12 +106,12 @@ class PolicyNetwork(nn.Module):
         return action.detach().cpu().numpy(), log_prob
         
 
+# TODO switch it to estimate V instead of Q (should also require other minor changes somewhere else)
 class CriticNetwork(nn.Module):
-    def __init__(self, state_dim: int = STATE_DIM, action_dim: int = ACTION_DIM):
+    def __init__(self, state_dim: int = STATE_DIM):
         super(CriticNetwork, self).__init__()
         
         self.state_dim = state_dim
-        self.action_dim = action_dim
         self.activation = nn.ReLU()
         self.maxPool = nn.MaxPool2d(kernel_size=2, stride=2)
         
@@ -134,7 +134,7 @@ class CriticNetwork(nn.Module):
         )
         
         self.FC = nn.Sequential(
-            nn.Linear(self.state_dim + self.action_dim, 256),
+            nn.Linear(self.state_dim, 256),
             self.activation,
             nn.Linear(256, 128),
             self.activation,
@@ -143,7 +143,7 @@ class CriticNetwork(nn.Module):
             nn.Linear(64, 1)
         )
         
-    def forward(self, x, goal, action):
+    def forward(self, x, goal):
         
         maps, poses, lidars = [], [], []
         
@@ -162,11 +162,10 @@ class CriticNetwork(nn.Module):
         maps = torch.stack(maps).to(device)
         poses = torch.stack(poses).to(device)
         lidars = torch.stack(lidars).to(device)
-        actions = torch.tensor(np.array(action)).to(device)
         goal = goal.unsqueeze(0).repeat(len(x), 1)
         
-        # Combine inputs and pass it through policy to get action mean and log_std
-        x = torch.cat((maps, poses, lidars, goal, actions), dim=1)
+        # Combine state to obtain V-value
+        x = torch.cat((maps, poses, lidars, goal), dim=1)
         q = self.FC(x)        
         
         return q
@@ -186,51 +185,47 @@ class PPOAgent(nn.Module):
         
         # Define actor/critic and their optimizers
         self.actor = PolicyNetwork(state_dim=state_dim, action_dim=action_dim)
-        self.critic = CriticNetwork(state_dim=state_dim, action_dim=action_dim)
+        self.critic = CriticNetwork(state_dim=state_dim)
         
         self.actor_optim = optim.Adam(self.actor.parameters(), lr=learning_rate)
         self.critic_optim = optim.Adam(self.critic.parameters(), lr=learning_rate)
         
         # Create target critic (not necessary, but could be added if we see any errors)
-        # self.target_critic = CriticNetwork(state_dim=state_dim, action_dim=action_dim)
+        # self.target_critic = CriticNetwork(state_dim=state_dim)
         # self.target_critic.load_state_dict(self.critic.state_dict())
         
-    def compute_returns_and_advantages(self, states, goal, actions, next_states, rewards, dones):
-        values = self.critic(states, goal, actions)
+    def compute_returns_and_advantages(self, states, goal, next_states, rewards, dones):
         with torch.no_grad():
-            next_actions, _ = self.actor.sample_action(next_states, goal)
-            next_values = self.critic(next_states, goal, next_actions)
+            values = self.critic(states, goal)
+            next_values = self.critic(next_states, goal)
         
-        # GAE variables
-        n_steps = len(rewards)
-        advantages = np.zeros(n_steps)
-        returns = np.zeros(n_steps)
-        gae = 0
-        return_t = 0
+        # Compute deltas (TD Error)
+        rewards = torch.tensor(rewards, dtype=torch.float32).to(device)
+        dones = torch.tensor(dones, dtype=torch.float32).to(device)
+        deltas = rewards + self.gamma * next_values.squeeze() * (1 - dones) - values.squeeze()
         
-        # Traverse in reverse order
-        for t in reversed(range(n_steps)):
-            # compute advantages 
-            delta = rewards[t] + self.gamma * next_values[t] * (1 - dones[t]) - values[t]
-            gae = delta + self.gamma * self.lamda * (1 - dones[t]) * gae
+        # Compute advantages and returns using GAE
+        advantages = torch.zeros_like(rewards).to(device)
+        returns = torch.zeros_like(rewards).to(device)
+        gae = 0.0
+        
+        for t in reversed(range(len(rewards))):
+            gae = deltas[t] + self.gamma * self.lamda * (1 - dones[t]) * gae
             advantages[t] = gae
-            
-            # compute returns
-            return_t = rewards[t] + self.gamma * (1 - dones[t]) * return_t  # target for critic Q = reward + gamma * Q' (return_t)
-            returns[t] =  return_t
-            
+            returns[t] = advantages[t] + values[t]
+        
         return returns, advantages
     
-    def update(self, states, goal, actions, old_log_probs, rewards, next_states, dones):
+    def update(self, states, goal, old_log_probs, rewards, next_states, dones):
         old_log_probs = torch.stack(old_log_probs).to(device).detach()
         
         # compute returns and advantages
-        returns, advantages = self.compute_returns_and_advantages(states, goal, actions, next_states, rewards, dones)
-        advantages = torch.tensor(advantages).to(device)
+        returns, advantages = self.compute_returns_and_advantages(states, goal, next_states, rewards, dones)
+        returns = returns.detach()
         
         # normalize advantages
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        advantages = advantages.unsqueeze(-1).detach()
+        advantages = advantages.detach()
         
         # PPO policy optimization
         for _ in range(self.num_epochs):
@@ -257,11 +252,10 @@ class PPOAgent(nn.Module):
             self.actor_optim.step()
             
             # compute value loss (critic loss)
-            critic_loss = torch.mean((returns - self.critic(states, goal, actions))**2)
+            critic_loss = torch.mean((returns - self.critic(states, goal))**2)
             
             # update critic
             self.critic_optim.zero_grad()
             critic_loss.backward()
             self.critic_optim.step()
-
             
