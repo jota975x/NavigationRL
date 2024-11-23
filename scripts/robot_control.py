@@ -15,6 +15,7 @@ ACTION_TIME = 0.2
 NUM_ACTION_PER_EPISODE = int(TOTAL_EPISODE_TIME // ACTION_TIME)
 NUM_EPISODES = 500
 NEW_GOAL_EVERY = 5
+SAVE_MODEL_EVERY = 10
 
 # device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -104,9 +105,13 @@ def main(args=None):
         # check final the distance to goal
         dist_goal = math.sqrt((next_state['pose'][0] - goal[0])**2 + (next_state['pose'][1] - goal[1])**2)
 
-        # TODO Log episode metrics
+        # Log episode metrics
         dist_to_goal_tracking.append(dist_goal)
         episode_rewards.append(total_reward)
+        
+        # save model
+        if episode % SAVE_MODEL_EVERY == 0:
+            torch.save(agent.state_dict(), f'src/navigationrl/saves/model_state_{episode}.pth')
 
     # Save training data
     with open('src/navigationrl/training_log/training_log.txt', 'w') as file:
