@@ -5,12 +5,12 @@ from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
 
 from nav_msgs.msg import OccupancyGrid
-from geometry_msgs.msg import PoseStamped
 from tf2_ros import TransformListener, Buffer
 import tf_transformations
 import numpy as np
+from std_srvs.srv import Empty
 
-MAP_SIZE = 750
+MAP_SIZE = 550
 MAXIMUM_RANGE = 5.0
 
 
@@ -33,7 +33,7 @@ class SlamIntegrationNode(Node):
 
         # Create DRL map (this ensures map passed into DRL agent has same size always)
         self.drl_map = np.zeros(shape=[MAP_SIZE, MAP_SIZE])
-        self.wall_threshold = 0.1
+        self.wall_threshold = 0.3
 
         # Initialize Transform Listener for localization (map -> base_link)
         self.tf_buffer = Buffer()
@@ -44,15 +44,6 @@ class SlamIntegrationNode(Node):
     def scan_callback(self, msg):
         self.lidar_data = np.array(msg.ranges)
         self.lidar_data[np.isinf(self.lidar_data)] = MAXIMUM_RANGE
-        # Convert to numpy array
-        # self.get_logger().info(f"LIDAR data processed: {self.lidar_data.shape}")
-        # Check for walls in the front section of the robot
-        #is_wall_detected = self.is_wall_in_front()
-
-        #if is_wall_detected:
-            #self.get_logger().warn("Wall detected in front!")
-        #else:
-            #self.get_logger().info("No wall in front.")
 
     def is_goal_reached(self, goal, pose):
         """
@@ -77,7 +68,7 @@ class SlamIntegrationNode(Node):
         threshold = 0.1  # Adjust as needed
         return distance < threshold
 
-    def is_wall_in_front(self):
+    def is_wall_close(self):
         """
         Check if a wall is within the threshold distance in the front of the robot.
         Returns:
@@ -89,15 +80,20 @@ class SlamIntegrationNode(Node):
         # Define the range of angles for the "front" section
         front_angle_start = 350  # Degrees near the front-left (in LIDAR indices)
         front_angle_end = 10  # Degrees near the front-right (wrap-around case)
+        
+        # Define the range of angles for the "front" section (robot can also go backwards)
+        back_angle_start = 170
+        back_angle_end = 190
 
         # Extract ranges for the front section
-        front_ranges = np.concatenate((
+        lidar_ranges = np.concatenate((
             self.lidar_data[front_angle_start:],
-            self.lidar_data[:front_angle_end]
+            self.lidar_data[:front_angle_end],
+            self.lidar_data[back_angle_start:back_angle_end]
         ))
 
         # Check if any range in the front is below the threshold
-        return np.any(front_ranges < self.wall_threshold)
+        return np.any(lidar_ranges < self.wall_threshold)
 
     def map_callback(self, msg):
         """
@@ -131,7 +127,7 @@ class SlamIntegrationNode(Node):
                 [rotation.x, rotation.y, rotation.z, rotation.w]
             )
             x, y, theta = translation.x, translation.y, euler[2]
-            self.get_logger().info(f"Robot Pose: x={x}, y={y}, theta={theta}")
+            # self.get_logger().info(f"Robot Pose: x={x}, y={y}, theta={theta}")
             return x, y, theta
         except Exception as e:
             # self.get_logger().warn(f"Failed to get robot pose: {e}")
@@ -224,3 +220,24 @@ class posNode(Node):
 
     def pos_callback(self, msg):
         self.latest_pos = msg.pose.pose
+        
+        
+class ResetWorldClient(Node):
+    def __init__(self):
+        super().__init__('reset_world_client')
+        
+        self.client = self.create_client(Empty, '/reset_world')
+        
+        while not self.client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('Service /gazebo/reset_world not available, waiting...')
+        self.get_logger().info('Created World Reset client')
+        
+    def reset_world(self):
+        request = Empty.Request()
+        future = self.client.call_async(request)
+        
+        rclpy.spin_until_future_complete(self, future)
+        if future.result() is not None:
+            self.get_logger().info('Successfully reset the world!')
+        else:
+            self.get_logger().error('Failed to reset the world.')

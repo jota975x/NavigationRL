@@ -26,6 +26,7 @@ install(PROGRAMS
   scripts/robot_control.py
   scripts/nodes.py
   scripts/agent.py
+  scripts/utils.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

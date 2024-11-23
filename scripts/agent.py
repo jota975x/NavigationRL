@@ -6,7 +6,7 @@ import numpy as np
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 MAP_FEATURE_DIM = 128
-MAP_SIZE = 750
+MAP_SIZE = 550
 STATE_DIM = 493
 ACTION_DIM = 2
 LOG_SIG_MIN = -20
@@ -18,11 +18,12 @@ ALPHA = 0.01
 CLIP_EPS = 0.2
 NUM_EPOCHS = 5
 LEARNING_RATE = 1e-3
-ACTION_LOW = torch.tensor([-1.0, -0.5]).to(device)
-ACTION_HIGH = torch.tensor([1.0, 0.5]).to(device)
+BATCH_SIZE = 64 # should help with processing
+ACTION_LOW = torch.tensor([-0.2, -0.5]).to(device)
+ACTION_HIGH = torch.tensor([0.7, 0.5]).to(device)
 
 class PolicyNetwork(nn.Module):
-    def __init__(self, state_dim: int = STATE_DIM, action_dim: int = ACTION_DIM):
+    def __init__(self, state_dim: int = STATE_DIM, action_dim: int = ACTION_DIM, batch_size: int=BATCH_SIZE):
         super(PolicyNetwork, self).__init__()
         
         self.state_dim = state_dim
@@ -31,22 +32,19 @@ class PolicyNetwork(nn.Module):
         self.maxPool = nn.MaxPool2d(kernel_size=2, stride=2)
         self.action_scale = ACTION_HIGH - ACTION_LOW
         self.action_bias = ACTION_LOW
+        self.batch_size = batch_size
         
         self.MapFeatureExtraction = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(1, 32, kernel_size=3, stride=2, padding=1),
             self.activation,
             self.maxPool,
             
-            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
-            self.activation,
-            self.maxPool,
-            
-            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(32, 16, kernel_size=3, stride=2, padding=1),
             self.activation,
             self.maxPool,
             
             nn.Flatten(),
-            nn.Linear(64 * (MAP_SIZE // 8) * (MAP_SIZE // 8), MAP_FEATURE_DIM),
+            nn.Linear(16 * (MAP_SIZE // 16) * (MAP_SIZE // 16), MAP_FEATURE_DIM),
             nn.ReLU()
         )
         
@@ -63,33 +61,40 @@ class PolicyNetwork(nn.Module):
         self.log_std = nn.Linear(64, action_dim)
         
     def forward(self, x, goal):
-        maps, poses, lidars = [], [], []
+        outputs = []
         
-        for i in range(len(x)):
-            map_ = torch.tensor(x[i]['map'], dtype=torch.float32).to(device).unsqueeze(0).unsqueeze(0)
-            pose_ = torch.tensor(x[i]['pose'], dtype=torch.float32).to(device)
-            lidar_ = torch.tensor(x[i]['lidar'], dtype=torch.float32).to(device)
+        for i in range(0, len(x), self.batch_size):
+            batch = x[i:i + self.batch_size]
+            
+            # prepare batched data
+            maps = torch.stack([torch.tensor(state['map'], dtype=torch.float32).to(device) for state in batch])
+            maps = maps.unsqueeze(1)    # for shape [B, 1, H, W]
+            poses = torch.stack([torch.tensor(state['pose'], dtype=torch.float32).to(device) for state in batch])
+            lidars = torch.stack([torch.tensor(state['lidar'], dtype=torch.float32).to(device) for state in batch])
             
             # get map features
-            map_features = self.MapFeatureExtraction(map_).squeeze()
+            map_features = self.MapFeatureExtraction(maps)
             
-            maps.append(map_features)
-            poses.append(pose_)
-            lidars.append(lidar_)
+            # repeat goal for the current batch
+            goal_batch = goal.unsqueeze(0).repeat(len(batch), 1)
             
-        maps = torch.stack(maps).to(device)
-        poses = torch.stack(poses).to(device)
-        lidars = torch.stack(lidars).to(device)
-        goal = goal.unsqueeze(0).repeat(len(x), 1)
+            # combine inputs and pass through policy network
+            inputs = torch.cat((map_features, poses, lidars, goal_batch), dim=1).to(device)
+            policy_out = self.FC(inputs)
+            mu = self.mu(policy_out)
+            log_std = self.log_std(policy_out)
+            log_std = torch.clamp(log_std, min=LOG_SIG_MIN, max=LOG_SIG_MAX)
+            
+            # collect outputs
+            outputs.append((mu, log_std))
+            
+        # concatenate all batch outputs
+        mus, log_stds = zip(*outputs)
+        mus = torch.cat(mus, dim=0).to(device)
+        log_stds = torch.cat(log_stds, dim=0).to(device)
         
-        # Combine inputs and pass it through policy to get action mean and log_std
-        x = torch.cat((maps, poses, lidars, goal), dim=1).to(device)
-        x = self.FC(x)
-        mu = self.mu(x)
-        log_std = self.log_std(x)
-        log_std = torch.clamp(log_std, min=LOG_SIG_MIN, max=LOG_SIG_MAX)
+        return mus, log_stds        
         
-        return mu, log_std
     
     def sample_action(self, state, goal):
         
@@ -110,28 +115,26 @@ class PolicyNetwork(nn.Module):
 
 # TODO switch it to estimate V instead of Q (should also require other minor changes somewhere else)
 class CriticNetwork(nn.Module):
-    def __init__(self, state_dim: int = STATE_DIM):
+    def __init__(self, state_dim: int = STATE_DIM, batch_size: int=BATCH_SIZE):
         super(CriticNetwork, self).__init__()
         
         self.state_dim = state_dim
+        self.batch_size = batch_size
         self.activation = nn.ReLU()
         self.maxPool = nn.MaxPool2d(kernel_size=2, stride=2)
         
         self.MapFeatureExtraction = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(1, 32, kernel_size=3, stride=2, padding=1),
             self.activation,
             self.maxPool,
             
-            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(32, 16, kernel_size=3, stride=2, padding=1),
             self.activation,
             self.maxPool,
             
-            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1),
-            self.activation,
-            self.maxPool,
             
             nn.Flatten(),
-            nn.Linear(64 * (MAP_SIZE // 8) * (MAP_SIZE // 8), MAP_FEATURE_DIM),
+            nn.Linear(16 * (MAP_SIZE // 16) * (MAP_SIZE // 16), MAP_FEATURE_DIM),
             nn.ReLU()
         )
         
@@ -146,36 +149,37 @@ class CriticNetwork(nn.Module):
         )
         
     def forward(self, x, goal):
+        outputs = []
         
-        maps, poses, lidars = [], [], []
-        
-        for i in range(len(x)):
-            map_ = torch.tensor(x[i]['map'], dtype=torch.float32).to(device).unsqueeze(0).unsqueeze(0)
-            pose_ = torch.tensor(x[i]['pose'], dtype=torch.float32).to(device)
-            lidar_ = torch.tensor(x[i]['lidar'], dtype=torch.float32).to(device)
+        for i in range(0, len(x), self.batch_size):
+            batch = x[i:i + self.batch_size]
+            
+            # prepare batched data
+            maps = torch.stack([torch.tensor(state['map'], dtype=torch.float32).to(device) for state in batch])
+            maps = maps.unsqueeze(1)    # for shape [B, 1, H, W]
+            poses = torch.stack([torch.tensor(state['pose'], dtype=torch.float32).to(device) for state in batch])
+            lidars = torch.stack([torch.tensor(state['lidar'], dtype=torch.float32).to(device) for state in batch])
             
             # get map features
-            map_features = self.MapFeatureExtraction(map_).squeeze()
+            map_features = self.MapFeatureExtraction(maps)
             
-            maps.append(map_features)
-            poses.append(pose_)
-            lidars.append(lidar_)
-
-        maps = torch.stack(maps).to(device)
-        poses = torch.stack(poses).to(device)
-        lidars = torch.stack(lidars).to(device)
-        goal = goal.unsqueeze(0).repeat(len(x), 1)
-        
-        # Combine state to obtain V-value
-        x = torch.cat((maps, poses, lidars, goal), dim=1)
-        q = self.FC(x)        
-        
-        return q
+            # repeat goal for the current batch
+            goal_batch = goal.unsqueeze(0).repeat(len(batch), 1)
+            
+            # combine inputs and pass through policy network
+            
+            inputs = torch.cat((map_features, poses, lidars, goal_batch), dim=1).to(device)
+            q =self.FC(inputs)
+            outputs.append(q)
+            
+        q_values = torch.cat(outputs, dim=0)     
+            
+        return q_values
     
 
 class PPOAgent(nn.Module):
     def __init__(self, state_dim: int=STATE_DIM, action_dim: int=ACTION_DIM, learning_rate = LEARNING_RATE,
-                 gamma=GAMMA, lambda_=LAMBDA, alpha=ALPHA, clip_eps=CLIP_EPS, num_epochs: int=NUM_EPOCHS):
+                 gamma=GAMMA, lambda_=LAMBDA, alpha=ALPHA, clip_eps=CLIP_EPS, num_epochs: int=NUM_EPOCHS, batch_size: int=BATCH_SIZE):
         super(PPOAgent, self).__init__()
         
         self.state_dim = state_dim
@@ -185,17 +189,15 @@ class PPOAgent(nn.Module):
         self.alpha = alpha
         self.clip_eps = clip_eps
         self.num_epochs = num_epochs
+        self.batch_size = batch_size
         
         # Define actor/critic and their optimizers
-        self.actor = PolicyNetwork(state_dim=state_dim, action_dim=action_dim)
-        self.critic = CriticNetwork(state_dim=state_dim)
+        self.actor = PolicyNetwork(state_dim=state_dim, action_dim=action_dim, batch_size=batch_size)
+        self.critic = CriticNetwork(state_dim=state_dim, batch_size=batch_size)
         
         self.actor_optim = optim.Adam(self.actor.parameters(), lr=learning_rate)
         self.critic_optim = optim.Adam(self.critic.parameters(), lr=learning_rate)
         
-        # Create target critic (not necessary, but could be added if we see any errors)
-        # self.target_critic = CriticNetwork(state_dim=state_dim)
-        # self.target_critic.load_state_dict(self.critic.state_dict())
         
     def compute_returns_and_advantages(self, states, goal, next_states, rewards, dones):
         with torch.no_grad():
@@ -231,17 +233,9 @@ class PPOAgent(nn.Module):
         advantages = advantages.detach()
         
         # PPO policy optimization
-        for _ in range(self.num_epochs):
+        for i in range(self.num_epochs):
             # sample actions from current policy
-            new_actions, new_logprobs, new_entropy = [], [], []
-            for state in states:    # assume same foal for all trajectory
-                action, log_prob, entropy = self.actor.sample_action(np.array([state]), goal)
-                new_actions.append(action.squeeze())
-                new_logprobs.append(log_prob.squeeze())
-                new_entropy.append(entropy)
-            new_logprobs = torch.stack(new_logprobs).to(device)
-            new_actions = torch.tensor(np.array(new_actions)).to(device)
-            new_entropy = torch.stack(new_entropy).to(device)
+            new_actions, new_logprobs, new_entropy = self.actor.sample_action(states, goal)
             
             # calculate ratios
             ratios = torch.exp(new_logprobs - old_log_probs)
@@ -251,7 +245,7 @@ class PPOAgent(nn.Module):
             obj_surrogate = torch.min(obj_clip, torch.clamp(ratios, 1 - self.clip_eps, 1 + self.clip_eps) * advantages)
             policy_loss = -torch.mean(obj_surrogate)
             # add entropy term
-            policy_loss = policy_loss + self.alpha * new_entropy.mean()
+            policy_loss = policy_loss + self.alpha * new_entropy
             
             # update actor
             self.actor_optim.zero_grad()
@@ -259,10 +253,9 @@ class PPOAgent(nn.Module):
             self.actor_optim.step()
             
             # compute value loss (critic loss)
-            critic_loss = torch.mean((returns - self.critic(states, goal))**2)
+            critic_loss = torch.mean((returns - self.critic(states, goal).squeeze())**2)
             
             # update critic
             self.critic_optim.zero_grad()
             critic_loss.backward()
             self.critic_optim.step()
-            

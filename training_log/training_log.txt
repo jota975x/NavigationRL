@@ -1,0 +1,2 @@
+Dist_to_goal: [9.093590594071086] 
+Training Rewards: [0]
