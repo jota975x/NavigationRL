@@ -17,12 +17,6 @@ NUM_EPISODES = 500
 NEW_GOAL_EVERY = 5
 SAVE_MODEL_EVERY = 10
 
-# device
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# Create agent
-agent = PPOAgent().to(device)
-
 
 def main(args=None):
     # iniate ros2 communication
@@ -36,6 +30,12 @@ def main(args=None):
     rclpy.spin_once(vel_node)
     rclpy.spin_once(pos_node)
     rclpy.spin_once(slam_node)
+    
+    # device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Create agent
+    agent = PPOAgent().to(device)
 
     episode_rewards = []
     dist_to_goal_tracking = []
@@ -46,7 +46,7 @@ def main(args=None):
         rclpy.spin_once(slam_node)
 
     # TRAINING LOOP
-    print("begin training")
+    print("Begin Training")
     for episode in range(NUM_EPISODES):
         # reset world
         reset_client.reset_world()
@@ -79,11 +79,12 @@ def main(args=None):
             reward = 0.0
             if (slam_node.is_wall_close()):
                 done = True
-                reward = -100
+                reward = -500
             if (slam_node.is_goal_reached(goal, next_state['pose'])):
                 done = True
-                reward = 100
+                reward = 500
             reward += get_reward(next_state['pose'], goal)
+            total_reward += reward
         
             # save trajectory
             states.append(state)
@@ -98,9 +99,7 @@ def main(args=None):
                 break
 
         # Agent Update with Rollout (trajectory)
-        print("Begin Update")
         agent.update(states, goal, old_log_probs, rewards, next_states, dones)
-        print("Model Updated")
         
         # check final the distance to goal
         dist_goal = math.sqrt((next_state['pose'][0] - goal[0])**2 + (next_state['pose'][1] - goal[1])**2)
@@ -108,6 +107,7 @@ def main(args=None):
         # Log episode metrics
         dist_to_goal_tracking.append(dist_goal)
         episode_rewards.append(total_reward)
+        print(f'Finished episode {episode} with total reward {total_reward:.2f}')
         
         # save model
         if episode % SAVE_MODEL_EVERY == 0:

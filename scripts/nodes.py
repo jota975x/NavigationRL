@@ -78,12 +78,12 @@ class SlamIntegrationNode(Node):
             return False  # No data available
 
         # Define the range of angles for the "front" section
-        front_angle_start = 350  # Degrees near the front-left (in LIDAR indices)
-        front_angle_end = 10  # Degrees near the front-right (wrap-around case)
+        front_angle_start = 345  # Degrees near the front-left (in LIDAR indices)
+        front_angle_end = 15  # Degrees near the front-right (wrap-around case)
         
         # Define the range of angles for the "front" section (robot can also go backwards)
-        back_angle_start = 170
-        back_angle_end = 190
+        back_angle_start = 165
+        back_angle_end = 195
 
         # Extract ranges for the front section
         lidar_ranges = np.concatenate((

@@ -20,7 +20,7 @@ NUM_EPOCHS = 5
 LEARNING_RATE = 3e-4
 BATCH_SIZE = 64 # should help with processing
 ACTION_LOW = torch.tensor([-0.2, -0.5]).to(device)
-ACTION_HIGH = torch.tensor([0.7, 0.5]).to(device)
+ACTION_HIGH = torch.tensor([0.5, 0.5]).to(device)
 
 class PolicyNetwork(nn.Module):
     def __init__(self, state_dim: int = STATE_DIM, action_dim: int = ACTION_DIM, batch_size: int=BATCH_SIZE):
