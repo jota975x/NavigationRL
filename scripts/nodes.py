@@ -1,14 +1,17 @@
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, TransformStamped
+import rclpy.serialization
+import rclpy.time
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
 
 from nav_msgs.msg import OccupancyGrid
-from tf2_ros import TransformListener, Buffer
+from tf2_ros import TransformListener, Buffer, TransformBroadcaster
 import tf_transformations
 import numpy as np
 from std_srvs.srv import Empty
+from slam_toolbox.srv import Pause, Clear
 
 MAP_SIZE = 550
 MAXIMUM_RANGE = 5.0
@@ -226,18 +229,110 @@ class ResetWorldClient(Node):
     def __init__(self):
         super().__init__('reset_world_client')
         
-        self.client = self.create_client(Empty, '/reset_world')
+        self.reset_client = self.create_client(Empty, '/reset_world')
+        self.pause_slam = self.create_client(Pause, '/slam_toolbox/pause_new_measurements')
+        self.clear_client = self.create_client(Clear, '/slam_toolbox/clear_changes')
         
-        while not self.client.wait_for_service(timeout_sec=1.0):
-            self.get_logger().info('Service /gazebo/reset_world not available, waiting...')
+        while not self.reset_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('Service /reset_world not available, waiting...')
         self.get_logger().info('Created World Reset client')
         
-    def reset_world(self):
-        request = Empty.Request()
-        future = self.client.call_async(request)
+        while not self.pause_slam.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('Service /slam_toolbox/pause_new_measurements not available, waiting...')
+        self.get_logger().info('Created Pause SLAM client')
         
-        rclpy.spin_until_future_complete(self, future)
-        if future.result() is not None:
-            self.get_logger().info('Successfully reset the world!')
-        else:
-            self.get_logger().error('Failed to reset the world.')
+        while not self.clear_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info('Service /slam_toolbox/clear_changes not available, waiting...')
+        self.get_logger().info('Created Clear Changes SLAM client')
+        
+        self.tf_broadcaster = TransformBroadcaster(self)
+        
+    def reset_world(self):
+        # Pause SLAM
+        self.get_logger().info('Pausing SLAM...')
+        pause_request = Pause.Request()
+        pause_future = self.pause_slam.call_async(pause_request)
+        pause_future.add_done_callback(self.pause_callback)
+        
+        rclpy.spin_until_future_complete(self, pause_future)
+        
+    def pause_callback(self, future):
+        try:
+            response = future.result()
+            if response.status:
+                self.get_logger().info('SLAM Pause Succesfully')
+                self.reset_world_service_call()
+            else:
+                self.get_logger().info('Failed to pause SLAM')
+        except Exception as e:
+            self.get_logger().error(f'Service call failed: {e}')
+            
+    def reset_world_service_call(self):
+        self.get_logger().info('Resetting the world...')
+        reset_request = Empty.Request()
+        reset_future = self.reset_client.call_async(reset_request)
+        reset_future.add_done_callback(self.reset_callback)
+        
+        rclpy.spin_until_future_complete(self, reset_future)
+         
+        
+    def reset_callback(self, future):
+        try:
+            response = future.result()
+            if response is not None:
+                # Clear changes in SLAM
+                clear_request = Clear.Request()
+                clear_future = self.clear_client.call_async(clear_request)
+                rclpy.spin_until_future_complete(self, clear_future)
+                
+                self.get_logger().info('Successfully reset the world')
+                # Reset robot position in tf
+                self.reset_robot_tf()
+                
+                # Unpause SLAM after resetting the world and robot position
+                self.unpause_slam()
+            else:
+                self.get_logger().info('Failed to reset the world')
+        except Exception as e:
+            self.get_logger().error(f'Service call failed: {e}')
+            
+    def reset_robot_tf(self):
+        self.get_logger().info('Resetting robot position in tf...')
+        
+        transform = TransformStamped()
+        transform.header.stamp = self.get_clock().now().to_msg()
+        transform.header.frame_id = 'odom'
+        transform.child_frame_id = 'base_link'
+        
+        transform.transform.translation.x = 0.0
+        transform.transform.translation.y = 0.0
+        transform.transform.translation.z = 0.0
+        
+        transform.transform.rotation.x = 0.0
+        transform.transform.rotation.y = 0.0
+        transform.transform.rotation.z = 0.0
+        transform.transform.rotation.w = 1.0
+        
+        self.tf_broadcaster.sendTransform(transform)
+        self.get_logger().info('Robot position reset in tf.')
+        
+    
+    def unpause_slam(self):
+        # Unpause SLAM
+        self.get_logger().info('Unpausing SLAM...')
+        unpause_request = Pause.Request()
+        unpause_future = self.pause_slam.call_async(unpause_request)
+        unpause_future.add_done_callback(self.unpause_callback)
+
+        # Wait for the unpause to complete
+        rclpy.spin_until_future_complete(self, unpause_future)
+            
+    def unpause_callback(self, future):
+        try:
+            response = future.result()
+            if response.status:
+                self.get_logger().info('SLAM unpaused successfully.')
+            else:
+                self.get_logger().error('Failed to unpause SLAM.')
+        except Exception as e:
+            self.get_logger().error(f'Service call failed: {e}')
