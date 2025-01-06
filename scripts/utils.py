@@ -107,9 +107,9 @@ def compute_reward_done(state, action, next_state):
     done = False
 
     # goal proximity reward
-    dist_reward = -k1 * (next_state['robot'][5] - state['robot'][5])
-    if next_state['robot'][5] < 0.2:
-        dist_reward += 100.0
+    dist_reward = -k1 * (1 / next_state['robot'][5])
+    if next_state['robot'][5] < 0.05:
+        dist_reward += 500.0
         done = True
 
     # angular deviation
@@ -130,7 +130,7 @@ def compute_reward_done(state, action, next_state):
     if min_lidar < 0.25:
         obstacle_penalty += -k6 * (1 - min_lidar)
     if min_lidar < 0.05:
-        obstacle_penalty = -200
+        obstacle_penalty = -1000
         done = True
 
     total_reward = dist_reward + ang_reward + smoothness_penalty + energy_penalty + time_penalty + obstacle_penalty
